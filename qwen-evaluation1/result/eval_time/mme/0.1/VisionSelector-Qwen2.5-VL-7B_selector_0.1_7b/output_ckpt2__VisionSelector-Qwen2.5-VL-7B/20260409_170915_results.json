@@ -1,0 +1,141 @@
+{
+  "results": {
+    "mme": {
+      "alias": "mme",
+      "mme_cognition_score,none": 621.0714285714286,
+      "mme_cognition_score_stderr,none": "N/A",
+      "mme_perception_score,none": 1601.1247498999599,
+      "mme_perception_score_stderr,none": "N/A"
+    }
+  },
+  "group_subtasks": {
+    "mme": []
+  },
+  "configs": {
+    "mme": {
+      "task": "mme",
+      "dataset_path": "/data/DataSet/vlm_dataset/MME",
+      "dataset_kwargs": {
+        "token": true
+      },
+      "test_split": "test",
+      "full_docs": false,
+      "process_results_use_image": false,
+      "doc_to_visual": "<function mme_doc_to_visual at 0x76a4985069e0>",
+      "doc_to_text": "<function mme_doc_to_text at 0x76a498506ef0>",
+      "doc_to_target": "answer",
+      "process_results": "<function mme_process_results at 0x76a4985072e0>",
+      "description": "",
+      "target_delimiter": " ",
+      "fewshot_delimiter": "\n\n",
+      "num_fewshot": 0,
+      "metric_list": [
+        {
+          "metric": "mme_perception_score",
+          "aggregation": "<function mme_aggregate_results at 0x76a4985076d0>",
+          "higher_is_better": true
+        },
+        {
+          "metric": "mme_cognition_score",
+          "aggregation": "<function mme_aggregate_results at 0x76a498507ac0>",
+          "higher_is_better": true
+        }
+      ],
+      "output_type": "generate_until",
+      "generation_kwargs": {
+        "max_new_tokens": 16,
+        "temperature": 0.0,
+        "top_p": 1.0,
+        "num_beams": 1,
+        "do_sample": false,
+        "until": [
+          "\n\n"
+        ]
+      },
+      "repeats": 1,
+      "should_decontaminate": false,
+      "metadata": [
+        {
+          "version": 0.0
+        }
+      ],
+      "lmms_eval_specific_kwargs": {
+        "default": {
+          "pre_prompt": "",
+          "post_prompt": "\nAnswer the question using a single word or phrase."
+        },
+        "gpt4v": {
+          "pre_prompt": "",
+          "post_prompt": "\nAnswer the question with Yes or No."
+        },
+        "qwen_vl": {
+          "pre_prompt": "",
+          "post_prompt": " Answer:"
+        },
+        "otterhd": {
+          "pre_prompt": "",
+          "post_prompt": " Answer:"
+        },
+        "xcomposer2_4khd": {
+          "pre_prompt": "[UNUSED_TOKEN_146]user\n",
+          "post_prompt": " Answer this question briefly[UNUSED_TOKEN_145]\n[UNUSED_TOKEN_146]assistant\n"
+        },
+        "plm": {
+          "pre_prompt": "",
+          "post_prompt": ""
+        },
+        "pre_prompt": "",
+        "post_prompt": "\nAnswer the question using a single word or phrase."
+      }
+    }
+  },
+  "versions": {
+    "mme": "Yaml"
+  },
+  "n-shot": {
+    "mme": 0
+  },
+  "higher_is_better": {
+    "mme": {
+      "mme_perception_score": true,
+      "mme_cognition_score": true
+    }
+  },
+  "n-samples": {
+    "mme": {
+      "original": 2374,
+      "effective": 2374
+    }
+  },
+  "config": {
+    "model": "qwen2_5_vl_with_token_compression",
+    "model_args": "pretrained=../output_ckpt2/VisionSelector-Qwen2.5-VL-7B,method=selector,budgets=0.1,spatial_ratio=0.1,cosine_penalty_weight=1,cosine_penalty_threshold=0.7,video_reader_backend=decord,video_max_pixels=151200,video_min_pixels=100352,attn_implementation=flash_attention_2",
+    "batch_size": "1",
+    "batch_sizes": [],
+    "device": null,
+    "use_cache": null,
+    "limit": null,
+    "bootstrap_iters": 100000,
+    "gen_kwargs": "",
+    "random_seed": 0,
+    "numpy_seed": 1234,
+    "torch_seed": 1234,
+    "fewshot_seed": 1234
+  },
+  "git_hash": null,
+  "date": "20260409_170915",
+  "task_hashes": {
+    "mme": "9c24eac542269fb2a5e6e01c572af9573a37ebd4bfecb6b7a32fc6768a9bd957"
+  },
+  "model_source": "qwen2_5_vl_with_token_compression",
+  "model_name": "../output_ckpt2/VisionSelector-Qwen2.5-VL-7B",
+  "model_name_sanitized": "output_ckpt2__VisionSelector-Qwen2.5-VL-7B",
+  "system_instruction": null,
+  "system_instruction_sha": null,
+  "fewshot_as_multiturn": false,
+  "chat_template": null,
+  "chat_template_sha": null,
+  "start_time": 177108.975548412,
+  "end_time": 177676.553530586,
+  "total_evaluation_time_seconds": "567.5779821739998"
+}

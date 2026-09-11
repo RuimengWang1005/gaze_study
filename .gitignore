@@ -1,0 +1,46 @@
+# 虚拟环境与缓存
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.log
+
+# 模型权重与检查点文件（防止超限）
+*.pt
+*.pth
+*.bin
+*.safetensors
+*.onnx
+*.ckpt
+*.h5
+checkpoints/
+weights/
+
+# 数据集
+data/
+datasets/# 虚拟环境与缓存
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.log
+
+# 模型权重与检查点文件（防止超限）
+*.pt
+*.pth
+*.bin
+*.safetensors
+*.onnx
+*.ckpt
+*.h5
+checkpoints/
+weights/
+
+# 数据集
+data/
+datasets/
+
+
+output_ckpt666/
+viscot_dataset/
+*.jsonl

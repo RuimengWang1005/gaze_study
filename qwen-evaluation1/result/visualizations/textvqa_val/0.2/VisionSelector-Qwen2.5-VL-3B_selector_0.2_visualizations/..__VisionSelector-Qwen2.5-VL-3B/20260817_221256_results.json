@@ -1,0 +1,134 @@
+{
+  "results": {
+    "textvqa_val": {
+      "alias": "textvqa_val",
+      "exact_match,none": 0.9800000000000001,
+      "exact_match_stderr,none": 0.019999999999999993,
+      "submission,none": null,
+      "submission_stderr,none": "N/A"
+    }
+  },
+  "group_subtasks": {
+    "textvqa_val": []
+  },
+  "configs": {
+    "textvqa_val": {
+      "task": "textvqa_val",
+      "dataset_path": "parquet",
+      "dataset_kwargs": {
+        "data_files": {
+          "train": [
+            "/data/DataSet/vlm_dataset/textvqa/data/validation-00000-of-00003.parquet",
+            "/data/DataSet/vlm_dataset/textvqa/data/validation-00001-of-00003.parquet",
+            "/data/DataSet/vlm_dataset/textvqa/data/validation-00002-of-00003.parquet"
+          ],
+          "validation": [
+            "/data/DataSet/vlm_dataset/textvqa/data/validation-00000-of-00003.parquet",
+            "/data/DataSet/vlm_dataset/textvqa/data/validation-00001-of-00003.parquet",
+            "/data/DataSet/vlm_dataset/textvqa/data/validation-00002-of-00003.parquet"
+          ]
+        }
+      },
+      "test_split": "train",
+      "full_docs": false,
+      "process_results_use_image": false,
+      "doc_to_visual": "<function textvqa_doc_to_visual at 0x7be5e6df12d0>",
+      "doc_to_text": "<function textvqa_doc_to_text at 0x7be5e6df16c0>",
+      "doc_to_target": "answer",
+      "process_results": "<function textvqa_process_results at 0x7be5e6df1990>",
+      "description": "",
+      "target_delimiter": " ",
+      "fewshot_delimiter": "\n\n",
+      "num_fewshot": 0,
+      "metric_list": [
+        {
+          "metric": "exact_match",
+          "aggregation": "mean",
+          "higher_is_better": true,
+          "ignore_case": true,
+          "ignore_punctuation": true
+        },
+        {
+          "metric": "submission",
+          "aggregation": "<function textvqa_aggregate_submissions at 0x7be5e6df1120>",
+          "higher_is_better": true
+        }
+      ],
+      "output_type": "generate_until",
+      "generation_kwargs": {
+        "until": [
+          "ASSISTANT:"
+        ]
+      },
+      "repeats": 1,
+      "should_decontaminate": false,
+      "lmms_eval_specific_kwargs": {
+        "default": {
+          "pre_prompt": "",
+          "post_prompt": "\nAnswer the question using a single word or phrase.",
+          "ocr": false
+        },
+        "qwen_vl": {
+          "pre_prompt": "",
+          "post_prompt": " Answer:"
+        },
+        "plm": {
+          "pre_prompt": "",
+          "post_prompt": "\nProvide a short and direct response."
+        },
+        "pre_prompt": "",
+        "post_prompt": "\nAnswer the question using a single word or phrase.",
+        "ocr": false
+      }
+    }
+  },
+  "versions": {
+    "textvqa_val": "Yaml"
+  },
+  "n-shot": {
+    "textvqa_val": 0
+  },
+  "higher_is_better": {
+    "textvqa_val": {
+      "exact_match": true,
+      "submission": true
+    }
+  },
+  "n-samples": {
+    "textvqa_val": {
+      "original": 5000,
+      "effective": 5
+    }
+  },
+  "config": {
+    "model": "qwen2_5_vl_with_token_compression_visual",
+    "model_args": "pretrained=../../VisionSelector-Qwen2.5-VL-3B,method=selector,budgets=0.2,spatial_ratio=0.1,cosine_penalty_weight=0.15,cosine_penalty_threshold=0.85,attn_implementation=flash_attention_2",
+    "batch_size": "1",
+    "batch_sizes": [],
+    "device": null,
+    "use_cache": null,
+    "limit": 5.0,
+    "bootstrap_iters": 100000,
+    "gen_kwargs": "",
+    "random_seed": 0,
+    "numpy_seed": 1234,
+    "torch_seed": 1234,
+    "fewshot_seed": 1234
+  },
+  "git_hash": null,
+  "date": "20260817_221256",
+  "task_hashes": {
+    "textvqa_val": "3ab46c40a8464ba1e2db0d2b462bb26f53abe8be4b2e540148161a15ea60ddad"
+  },
+  "model_source": "qwen2_5_vl_with_token_compression_visual",
+  "model_name": "../../VisionSelector-Qwen2.5-VL-3B",
+  "model_name_sanitized": "..__VisionSelector-Qwen2.5-VL-3B",
+  "system_instruction": null,
+  "system_instruction_sha": null,
+  "fewshot_as_multiturn": false,
+  "chat_template": null,
+  "chat_template_sha": null,
+  "start_time": 9463684.502359826,
+  "end_time": 9463699.552391998,
+  "total_evaluation_time_seconds": "15.050032172352076"
+}

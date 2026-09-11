@@ -1,0 +1,21 @@
+Image Path: /home/bbhan/gaze/gaicolgemii211/qwen-evaluation1/000000097994.jpg
+Requested Min Pixels: 803520
+Requested Max Pixels: 1003520
+Processed Image Size(s): [(1120, 756)]
+Method: 0.1
+Dominant Tokens: 97
+Contextual Tokens: 11
+--------------------
+Question: What text elements are there in the picture?
+--------------------
+Model Answer: The text elements visible in the picture include:
+
+1. "17:05" - This appears to be the time displayed on a digital clock.
+2. The text on the laptop screen is not clearly legible, but it seems to be some form of text or data.
+3. There is no other text visible in the image that can be identified with certainty.
+--------------------
+Image Grid THW: [[1, 54, 80]]
+Token Grid: 27 x 40
+Total Patches: 1080
+Selected Patches: 108
+Retention Rate: 10.00%

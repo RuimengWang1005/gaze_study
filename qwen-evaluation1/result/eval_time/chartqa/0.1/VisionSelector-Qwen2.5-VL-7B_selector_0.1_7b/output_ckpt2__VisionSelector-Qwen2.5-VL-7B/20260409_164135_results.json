@@ -1,0 +1,131 @@
+{
+  "results": {
+    "chartqa": {
+      "alias": "chartqa",
+      "relaxed_overall,none": 0.6204,
+      "relaxed_overall_stderr,none": 0.009707689307588994,
+      "relaxed_human_split,none": 0.4368,
+      "relaxed_human_split_stderr,none": 0.014034321420795292,
+      "relaxed_augmented_split,none": 0.804,
+      "relaxed_augmented_split_stderr,none": 0.011232458969771838
+    }
+  },
+  "group_subtasks": {
+    "chartqa": []
+  },
+  "configs": {
+    "chartqa": {
+      "task": "chartqa",
+      "dataset_path": "lmms-lab/ChartQA",
+      "dataset_kwargs": {
+        "token": true
+      },
+      "test_split": "test",
+      "full_docs": false,
+      "process_results_use_image": false,
+      "doc_to_visual": "<function chartqa_doc_to_visual at 0x73e5368769e0>",
+      "doc_to_text": "<function chartqa_doc_to_text at 0x73e536876cb0>",
+      "doc_to_target": "answer",
+      "process_results": "<function chartqa_process_results at 0x73e536876f80>",
+      "description": "",
+      "target_delimiter": " ",
+      "fewshot_delimiter": "\n\n",
+      "num_fewshot": 0,
+      "metric_list": [
+        {
+          "metric": "relaxed_overall",
+          "aggregation": "mean",
+          "higher_is_better": true
+        },
+        {
+          "metric": "relaxed_human_split",
+          "aggregation": "mean",
+          "higher_is_better": true
+        },
+        {
+          "metric": "relaxed_augmented_split",
+          "aggregation": "mean",
+          "higher_is_better": true
+        }
+      ],
+      "output_type": "generate_until",
+      "generation_kwargs": {
+        "max_new_tokens": 16,
+        "temperature": 0.0,
+        "do_sample": false,
+        "until": [
+          "\n\n"
+        ]
+      },
+      "repeats": 1,
+      "should_decontaminate": false,
+      "metadata": [
+        {
+          "version": 0.0
+        }
+      ],
+      "lmms_eval_specific_kwargs": {
+        "default": {
+          "pre_prompt": "",
+          "post_prompt": "\nAnswer the question with a single word."
+        },
+        "qwen_vl": {
+          "pre_prompt": "",
+          "post_prompt": " Answer:"
+        },
+        "pre_prompt": "",
+        "post_prompt": "\nAnswer the question with a single word."
+      }
+    }
+  },
+  "versions": {
+    "chartqa": "Yaml"
+  },
+  "n-shot": {
+    "chartqa": 0
+  },
+  "higher_is_better": {
+    "chartqa": {
+      "relaxed_overall": true,
+      "relaxed_human_split": true,
+      "relaxed_augmented_split": true
+    }
+  },
+  "n-samples": {
+    "chartqa": {
+      "original": 2500,
+      "effective": 2500
+    }
+  },
+  "config": {
+    "model": "qwen2_5_vl_with_token_compression",
+    "model_args": "pretrained=../output_ckpt2/VisionSelector-Qwen2.5-VL-7B,method=selector,budgets=0.1,spatial_ratio=0.1,cosine_penalty_weight=1,cosine_penalty_threshold=0.7,video_reader_backend=decord,video_max_pixels=151200,video_min_pixels=100352,attn_implementation=flash_attention_2",
+    "batch_size": "1",
+    "batch_sizes": [],
+    "device": null,
+    "use_cache": null,
+    "limit": null,
+    "bootstrap_iters": 100000,
+    "gen_kwargs": "",
+    "random_seed": 0,
+    "numpy_seed": 1234,
+    "torch_seed": 1234,
+    "fewshot_seed": 1234
+  },
+  "git_hash": null,
+  "date": "20260409_164135",
+  "task_hashes": {
+    "chartqa": "856b55b139c536b1f3a7541bdbc5a0dd807d8ac5ab0bbafd2035fe47a90867d1"
+  },
+  "model_source": "qwen2_5_vl_with_token_compression",
+  "model_name": "../output_ckpt2/VisionSelector-Qwen2.5-VL-7B",
+  "model_name_sanitized": "output_ckpt2__VisionSelector-Qwen2.5-VL-7B",
+  "system_instruction": null,
+  "system_instruction_sha": null,
+  "fewshot_as_multiturn": false,
+  "chat_template": null,
+  "chat_template_sha": null,
+  "start_time": 175448.651958123,
+  "end_time": 176026.24225205,
+  "total_evaluation_time_seconds": "577.5902939270018"
+}
