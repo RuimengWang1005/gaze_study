@@ -44,3 +44,6 @@ datasets/
 output_ckpt666/
 viscot_dataset/
 *.jsonl
+
+# Isolated diagnostic runs (never baseline result folders).
+qwen-evaluation1/audit_outputs/
