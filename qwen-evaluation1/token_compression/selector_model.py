@@ -167,6 +167,32 @@ def _grid_thw_to_token_lengths(grid_thw: Optional[torch.Tensor], merge_size: int
     return lengths
 
 
+def _build_merged_token_coordinates(
+    grid_thw: torch.Tensor,
+    merge_size: int,
+    device: torch.device,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Return normalized (row, col) and image ids in merged-token order."""
+    grid = grid_thw.unsqueeze(0) if grid_thw.dim() == 1 else grid_thw
+    coords: List[torch.Tensor] = []
+    image_ids: List[torch.Tensor] = []
+    for image_id, entry in enumerate(grid.to(dtype=torch.long).tolist()):
+        t, h, w = entry[:3]
+        h_m = max(int(h) // int(merge_size), 1)
+        w_m = max(int(w) // int(merge_size), 1)
+        rows = torch.arange(max(int(t), 1) * h_m, device=device, dtype=torch.float32)
+        cols = torch.arange(w_m, device=device, dtype=torch.float32)
+        rr, cc = torch.meshgrid(rows, cols, indexing="ij")
+        rr = rr / max(max(int(t), 1) * h_m - 1, 1)
+        cc = cc / max(w_m - 1, 1)
+        coords.append(torch.stack((rr.reshape(-1), cc.reshape(-1)), dim=-1))
+        image_ids.append(torch.full((rr.numel(),), image_id, device=device, dtype=torch.long))
+    if not coords:
+        return (torch.empty((0, 2), device=device, dtype=torch.float32),
+                torch.empty((0,), device=device, dtype=torch.long))
+    return torch.cat(coords), torch.cat(image_ids)
+
+
 def _normalize_cosine_params(
     penalty_weight: float,
     similarity_threshold: float,
@@ -329,6 +355,124 @@ def _select_indices_with_cosine_penalty(
     return torch.tensor(selected, dtype=torch.long, device=scores.device)
 
 
+@torch.no_grad()
+def _select_indices_with_distance_aware_penalty(
+    scores: torch.Tensor,
+    token_features: Optional[torch.Tensor],
+    token_coordinates: torch.Tensor,
+    token_image_ids: torch.Tensor,
+    k: int,
+    penalty_weight: float,
+    similarity_threshold: float,
+    distance_sigma: float,
+    distance_floor: float,
+    diagnostics: Optional[dict] = None,
+) -> torch.Tensor:
+    """Greedy soft redundancy penalty weighted by normalized grid distance."""
+    total = int(scores.numel())
+    if diagnostics is not None:
+        diagnostics.setdefault("fallback_count", 0)
+    if total == 0 or k <= 0:
+        return torch.empty((0,), dtype=torch.long, device=scores.device)
+    k = min(int(k), total)
+    if k >= total:
+        return torch.arange(total, dtype=torch.long, device=scores.device)
+    penalty_weight, similarity_threshold = _normalize_cosine_params(
+        penalty_weight, similarity_threshold
+    )
+    distance_sigma = float(distance_sigma)
+    distance_floor = max(0.0, min(1.0, float(distance_floor)))
+    valid = (
+        penalty_weight > 0.0
+        and distance_sigma > 0.0
+        and token_features is not None
+        and token_features.dim() == 2
+        and token_features.shape[0] == total
+        and token_coordinates.shape == (total, 2)
+        and token_image_ids.shape == (total,)
+    )
+    if not valid:
+        if diagnostics is not None:
+            diagnostics["fallback_count"] += 1
+        return torch.topk(scores, k=k, dim=0, largest=True).indices
+
+    feat = F.normalize(token_features.to(dtype=torch.float32), p=2, dim=-1, eps=1e-6)
+    coords = token_coordinates.to(device=scores.device, dtype=torch.float32)
+    image_ids = token_image_ids.to(device=scores.device, dtype=torch.long)
+    base_scores = scores.to(dtype=torch.float32)
+    max_penalty = torch.zeros(total, device=scores.device, dtype=torch.float32)
+    selected_mask = torch.zeros(total, dtype=torch.bool, device=scores.device)
+    selected: List[int] = []
+
+    seed_idx = int(torch.argmax(base_scores).item())
+    selected_mask[seed_idx] = True
+    selected.append(seed_idx)
+
+    def pair_penalty(index: int) -> torch.Tensor:
+        cosine = torch.matmul(feat, feat[index])
+        similarity = torch.relu(cosine - similarity_threshold)
+        distance_sq = ((coords - coords[index]) ** 2).sum(dim=-1)
+        kernel = distance_floor + (1.0 - distance_floor) * torch.exp(
+            -distance_sq / (2.0 * distance_sigma * distance_sigma)
+        )
+        same_image = image_ids == image_ids[index]
+        return similarity * kernel * same_image.to(dtype=kernel.dtype)
+
+    max_penalty = torch.maximum(max_penalty, pair_penalty(seed_idx))
+    candidate_mask = ~selected_mask
+    lambda_eff = _compute_scale_matched_lambda(
+        base_scores[candidate_mask], max_penalty[candidate_mask], alpha=penalty_weight
+    )
+    while len(selected) < k:
+        penalized = (base_scores - lambda_eff * max_penalty).masked_fill(
+            selected_mask, float("-inf")
+        )
+        next_idx = int(torch.argmax(penalized).item())
+        if selected_mask[next_idx] or not torch.isfinite(penalized[next_idx]):
+            break
+        selected_mask[next_idx] = True
+        selected.append(next_idx)
+        if len(selected) < k:
+            max_penalty = torch.maximum(max_penalty, pair_penalty(next_idx))
+
+    if len(selected) < k:
+        if diagnostics is not None:
+            diagnostics["fallback_count"] += 1
+        remaining = torch.where(~selected_mask)[0]
+        need = min(k - len(selected), int(remaining.numel()))
+        if need:
+            top_rel = torch.topk(base_scores[remaining], k=need, largest=True).indices
+            selected.extend(remaining[top_rel].tolist())
+    return torch.tensor(selected, dtype=torch.long, device=scores.device)
+
+
+def _select_focal_indices(
+    scores: torch.Tensor,
+    token_features: torch.Tensor,
+    k: int,
+    penalty_weight: float,
+    similarity_threshold: float,
+    distance_aware_redundancy: bool = False,
+    token_coordinates: Optional[torch.Tensor] = None,
+    token_image_ids: Optional[torch.Tensor] = None,
+    distance_sigma: float = 0.1,
+    distance_floor: float = 0.0,
+    diagnostics: Optional[dict] = None,
+) -> torch.Tensor:
+    """Route focal selection while preserving the disabled legacy call exactly."""
+    if not distance_aware_redundancy:
+        return _select_indices_with_cosine_penalty(
+            scores, token_features, k, penalty_weight, similarity_threshold
+        )
+    if token_coordinates is None or token_image_ids is None:
+        raise ValueError("Distance-aware focal selection requires coordinates and image ids")
+    return _select_indices_with_distance_aware_penalty(
+        scores, token_features, token_coordinates, token_image_ids, k,
+        penalty_weight, similarity_threshold, distance_sigma, distance_floor,
+        diagnostics,
+    )
+
+
 class Qwen2_5_VisionTransformerPretrainedModel_Selector(Qwen2_5_VisionTransformerPretrainedModel):
     """
     推理专用：带有硬剪枝功能的视觉 Transformer
@@ -404,6 +548,14 @@ class Qwen2_5_VisionTransformerPretrainedModel_Selector(Qwen2_5_VisionTransforme
                 ),
             ),
         )
+        self.distance_aware_redundancy = bool(
+            getattr(config, "distance_aware_redundancy", False)
+        )
+        self.distance_sigma = float(getattr(config, "distance_sigma", 0.1))
+        self.distance_floor = float(getattr(config, "distance_floor", 0.0))
+        self.distance_apply_to = str(getattr(config, "distance_apply_to", "focal"))
+        if self.distance_apply_to != "focal":
+            raise ValueError("Only distance_apply_to='focal' is supported")
         self.selector_focal_redundancy_limit = max(
             0,
             int(
@@ -430,6 +582,7 @@ class Qwen2_5_VisionTransformerPretrainedModel_Selector(Qwen2_5_VisionTransforme
         self.last_selected_labels = None
         self.last_focal_features = None
         self.last_spatial_features = None
+        self.last_selector_fallback_count = 0
         self.last_vision_encoder_time_ms = None
         self.last_selector_score_select_time_ms = None
         self._last_vision_encoder_start_event = None
@@ -519,6 +672,7 @@ class Qwen2_5_VisionTransformerPretrainedModel_Selector(Qwen2_5_VisionTransforme
         total_token_num = hidden_states.shape[0]
         focal_indices = None
         spatial_indices = None
+        self.last_selector_fallback_count = 0
         
         # hidden_states: [N, D] -> unsqueeze -> [1, N, D]
         hidden_states_unsqueezed = hidden_states.unsqueeze(0) 
@@ -554,17 +708,29 @@ class Qwen2_5_VisionTransformerPretrainedModel_Selector(Qwen2_5_VisionTransforme
                 and focal_redundancy_limit > 0
                 and focal_redundancy_limit < k_foc
             )
+            use_distance_focal = bool(getattr(self, "distance_aware_redundancy", False))
+            distance_diagnostics = {"fallback_count": 0}
+            if use_distance_focal:
+                if getattr(self, "distance_apply_to", "focal") != "focal":
+                    raise ValueError("Only distance_apply_to='focal' is supported")
+                token_coordinates, token_image_ids = _build_merged_token_coordinates(
+                    grid_thw, max(1, int(getattr(self, "spatial_merge_size", 2))), hidden_states.device
+                )
+                if token_coordinates.shape[0] != total_token_num:
+                    raise ValueError("Merged token coordinate count does not match visual tokens")
 
             if use_limited_focal_redundancy:
                 focal_seed_k = min(k_foc, focal_redundancy_limit)
-                focal_indices = _select_indices_with_cosine_penalty(
-                    learned_scores,
-                    hidden_states,
-                    focal_seed_k,
-                    cosine_penalty_weight,
-                    cosine_penalty_threshold,
+                focal_indices = _select_focal_indices(
+                    learned_scores, hidden_states, focal_seed_k,
+                    cosine_penalty_weight, cosine_penalty_threshold,
+                    use_distance_focal,
+                    token_coordinates if use_distance_focal else None,
+                    token_image_ids if use_distance_focal else None,
+                    self.distance_sigma, self.distance_floor, distance_diagnostics,
                 )
                 if focal_indices.numel() != focal_seed_k:
+                    self.last_selector_fallback_count += 1
                     focal_indices = torch.topk(learned_scores, focal_seed_k, dim=0).indices
 
                 if focal_indices.numel() < k_foc:
@@ -581,14 +747,17 @@ class Qwen2_5_VisionTransformerPretrainedModel_Selector(Qwen2_5_VisionTransforme
                         ).indices
                         focal_indices = torch.cat([focal_indices, remaining[top_rel]], dim=0)
             else:
-                focal_indices = _select_indices_with_cosine_penalty(
-                    learned_scores,
-                    hidden_states,
-                    k_foc,
-                    cosine_penalty_weight,
-                    cosine_penalty_threshold,
+                focal_indices = _select_focal_indices(
+                    learned_scores, hidden_states, k_foc,
+                    cosine_penalty_weight, cosine_penalty_threshold,
+                    use_distance_focal,
+                    token_coordinates if use_distance_focal else None,
+                    token_image_ids if use_distance_focal else None,
+                    self.distance_sigma, self.distance_floor, distance_diagnostics,
                 )
+            self.last_selector_fallback_count += int(distance_diagnostics["fallback_count"])
             if focal_indices.numel() != k_foc:
+                self.last_selector_fallback_count += 1
                 focal_indices = torch.topk(learned_scores, k_foc, dim=0).indices
             focal_indices, _ = torch.sort(focal_indices)
 
@@ -714,6 +883,7 @@ class Qwen2_5_VisionTransformerPretrainedModel_Selector(Qwen2_5_VisionTransforme
                                     reference_features=foc_features_img,
                                 )
                                 if keep_rel_local.numel() != spa_i:
+                                    self.last_selector_fallback_count += 1
                                     keep_rel_local = torch.topk(candidate_scores, spa_i, largest=True).indices
                                 final_candidates = candidate_tensor[keep_rel_local]
                             else:
@@ -748,6 +918,7 @@ class Qwen2_5_VisionTransformerPretrainedModel_Selector(Qwen2_5_VisionTransforme
                                     reference_features=ref_features,
                                 )
                                 if topk_rel.numel() != need:
+                                    self.last_selector_fallback_count += 1
                                     topk_rel = torch.topk(remaining_scores, k=need, largest=True).indices
                                 selected_within = torch.cat(
                                     [selected_within, non_foc_within[remaining_rel[topk_rel]]], dim=0
@@ -765,6 +936,7 @@ class Qwen2_5_VisionTransformerPretrainedModel_Selector(Qwen2_5_VisionTransforme
                                 reference_features=foc_features_img,
                             )
                             if topk_rel.numel() != spa_i:
+                                self.last_selector_fallback_count += 1
                                 topk_rel = torch.topk(selected_scores, k=spa_i, largest=True).indices
                             selected_within = selected_within[topk_rel]
 
@@ -795,6 +967,7 @@ class Qwen2_5_VisionTransformerPretrainedModel_Selector(Qwen2_5_VisionTransforme
                             reference_features=ref_features,
                         )
                         if extra.numel() != need:
+                            self.last_selector_fallback_count += 1
                             extra = torch.topk(
                                 learned_scores[cand],
                                 k=need,
@@ -812,6 +985,7 @@ class Qwen2_5_VisionTransformerPretrainedModel_Selector(Qwen2_5_VisionTransforme
                         reference_features=hidden_states[focal_indices] if focal_indices.numel() > 0 else None,
                     )
                     if topm.numel() != spa_budget:
+                        self.last_selector_fallback_count += 1
                         topm = torch.topk(learned_scores[spatial_indices], k=spa_budget, largest=True).indices
                     spatial_indices = spatial_indices[topm]
                 spatial_indices, _ = torch.sort(spatial_indices)

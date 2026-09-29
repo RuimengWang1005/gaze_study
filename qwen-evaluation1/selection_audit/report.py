@@ -41,7 +41,7 @@ def summarize(records):
                "miss_reason_fraction_of_visible_parts": {k: reasons[k] / len(parts) if parts else None
                     for k in ("scorer_miss", "selection_suppression", "near_candidate")}}
     micro = {}
-    for radius in (0, 1):
+    for radius in (0, 1, 2):
         key = str(radius)
         rescued = sum(not p["coverage"]["focal"][key] and p["coverage"]["spatial"][key] for p in parts)
         focal_misses = sum(not p["coverage"]["focal"][key] for p in parts)
@@ -61,9 +61,9 @@ def summarize(records):
         macro_parts = [p for p in parts if p["macro"] == macro]
         summary["macro_parts"][macro] = {"visible_images": len(present), "visible_parts": len(macro_parts),
             "any_part_recall": {name: {str(radius): sum(c[name][str(radius)] for c in present) / len(present)
-                if present else None for radius in (0, 1)} for name in ("focal", "spatial", "union", "raw_topk")},
+                if present else None for radius in (0, 1, 2)} for name in ("focal", "spatial", "union", "raw_topk")},
             "part_recall": {name: {str(radius): sum(p["coverage"][name][str(radius)] for p in macro_parts) / len(macro_parts)
-                if macro_parts else None for radius in (0, 1)} for name in ("focal", "spatial", "union", "raw_topk")}}
+                if macro_parts else None for radius in (0, 1, 2)} for name in ("focal", "spatial", "union", "raw_topk")}}
     rows = [flatten({"metrics": r["metrics"], "coverage": r["coverage"],
                      "bbox_outside_ratio": r["bbox_outside_ratio"], "K": r["K"],
                      "K_focal": r["K_focal"], "K_spatial": r["K_spatial"],

@@ -77,6 +77,31 @@ def duplicate_metrics(indices, features, width, radius=1, threshold=0.7):
                                  if local[i].any() else None for i in range(n)]}
 
 
+def selected_distance_metrics(indices, features, height, width, threshold=0.7):
+    ids = np.asarray(indices, dtype=int)
+    if len(ids) < 2:
+        return {"mean_nearest_neighbor_distance": None,
+                "local_high_similarity_pair_ratio": None,
+                "local_pair_count": 0, "local_high_similarity_pair_count": 0}
+    coords = coordinates(ids, width).astype(np.float32)
+    coords[:, 0] /= max(height - 1, 1)
+    coords[:, 1] /= max(width - 1, 1)
+    euclidean = np.sqrt(((coords[:, None] - coords[None, :]) ** 2).sum(axis=-1))
+    np.fill_diagonal(euclidean, np.inf)
+    feats = np.asarray(features[ids], dtype=np.float32)
+    feats /= np.maximum(np.linalg.norm(feats, axis=1, keepdims=True), 1e-6)
+    cosine = np.clip(feats @ feats.T, -1, 1)
+    chebyshev = distances(coordinates(ids, width))
+    upper = np.triu(np.ones((len(ids), len(ids)), dtype=bool), k=1)
+    local = upper & (chebyshev <= 1)
+    local_count = int(local.sum())
+    high_count = int((local & (cosine >= threshold)).sum())
+    return {"mean_nearest_neighbor_distance": float(euclidean.min(axis=1).mean()),
+            "local_high_similarity_pair_ratio": high_count / local_count if local_count else None,
+            "local_pair_count": local_count,
+            "local_high_similarity_pair_count": high_count}
+
+
 def hit(indices, cell, width, radius):
     coords = coordinates(indices, width)
     return bool(len(coords) and (np.abs(coords - cell).max(axis=1) <= radius).any())
@@ -108,6 +133,9 @@ def analyze(scores, features, selected, focal, spatial, parts, bbox,
         duplicates[name] = {str(r): duplicate_metrics(branches[name], features, width, r, threshold)
                             for r in (1, 2)}
         metrics[name]["duplicates"] = duplicates[name]
+        metrics[name]["distance"] = selected_distance_metrics(
+            branches[name], features, height, width, threshold
+        )
     visible = []
     all_coords = coordinates(np.arange(n), width)
     for part in parts:
@@ -116,7 +144,7 @@ def analyze(scores, features, selected, focal, spatial, parts, bbox,
         part = dict(part)
         cell = part_cell(part["x"], part["y"], original_width, original_height, height, width)
         part["grid"] = cell
-        part["coverage"] = {name: {str(r): hit(ids, cell, width, r) for r in (0, 1)}
+        part["coverage"] = {name: {str(r): hit(ids, cell, width, r) for r in (0, 1, 2)}
                             for name, ids in branches.items()}
         nearby = np.flatnonzero(np.abs(all_coords - cell).max(axis=1) <= 1)
         q = int(nearby[np.argmin(ranks[nearby])])
@@ -134,7 +162,7 @@ def analyze(scores, features, selected, focal, spatial, parts, bbox,
                 raise AssertionError("A selected neighborhood token cannot be a union miss")
         visible.append(part)
     coverage = {}
-    for r in (0, 1):
+    for r in (0, 1, 2):
         key = str(r)
         count = len(visible)
         rescued = [p["name"] for p in visible if not p["coverage"]["focal"][key]
@@ -153,7 +181,7 @@ def analyze(scores, features, selected, focal, spatial, parts, bbox,
     for macro in sorted({p["macro"] for p in visible}):
         group = [p for p in visible if p["macro"] == macro]
         macros[macro] = {name: {str(r): any(p["coverage"][name][str(r)] for p in group)
-                                for r in (0, 1)} for name in branches}
+                                for r in (0, 1, 2)} for name in branches}
     missed_macros = [m for m, cov in macros.items() if not cov["union"]["1"]]
     candidate_macros = [m for m in missed_macros if any(p["macro"] == m and
                         p["best_neighbor_raw_rank"] <= 2 * kf for p in visible)]

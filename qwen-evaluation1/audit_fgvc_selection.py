@@ -47,6 +47,13 @@ def parse_args():
     p.add_argument("--equivalence", action="store_true", help="Run original eval first, then compare exactly 5 examples")
     p.add_argument("--duplicate-threshold", type=float, default=.7,
                    help="Diagnostic cosine threshold only; does not affect GAZE")
+    p.add_argument("--output-root", type=Path, default=HERE / "audit_outputs")
+    p.add_argument("--spatial-ratio-override", type=float)
+    p.add_argument("--cosine-penalty-weight-override", type=float)
+    p.add_argument("--distance-aware-redundancy", action="store_true")
+    p.add_argument("--distance-sigma", type=float, default=.1)
+    p.add_argument("--distance-floor", type=float, default=0.)
+    p.add_argument("--distance-apply-to", choices=("focal",), default="focal")
     args = p.parse_args()
     if not 0 < args.budget <= 1 or not -1 <= args.duplicate_threshold <= 1:
         p.error("Invalid budget or diagnostic threshold")
@@ -56,6 +63,8 @@ def parse_args():
         p.error("equivalence requires --mode fgvc-options --budget 0.1 --limit 5")
     if args.manifest and (args.mode != "cub-train" or args.limit is not None):
         p.error("manifest requires cub-train and no limit")
+    if args.distance_sigma <= 0 or not 0 <= args.distance_floor <= 1:
+        p.error("distance sigma/floor out of range")
     return args
 
 
@@ -79,7 +88,18 @@ def baseline_args(cli, output):
         cfg[key] = str((HERE / value).resolve() if not value.is_absolute() else value.resolve())
         if not Path(cfg[key]).exists():
             raise FileNotFoundError(cfg[key])
-    cfg.update(budgets=cli.budget, limit=cli.limit, results_output_folder=str(output / "original_eval"))
+    cfg.setdefault("distance_aware_redundancy", False)
+    cfg.setdefault("distance_sigma", .1)
+    cfg.setdefault("distance_floor", 0.)
+    cfg.setdefault("distance_apply_to", "focal")
+    cfg.update(budgets=cli.budget, limit=cli.limit, results_output_folder=str(output / "original_eval"),
+               distance_aware_redundancy=cli.distance_aware_redundancy,
+               distance_sigma=cli.distance_sigma, distance_floor=cli.distance_floor,
+               distance_apply_to=cli.distance_apply_to)
+    if cli.spatial_ratio_override is not None:
+        cfg["spatial_ratio"] = cfg["contextual_ratio"] = cli.spatial_ratio_override
+    if cli.cosine_penalty_weight_override is not None:
+        cfg["cosine_penalty_weight"] = cli.cosine_penalty_weight_override
     return argparse.Namespace(**cfg), payload
 
 
@@ -183,6 +203,10 @@ def snapshot(model, item, args, threshold):
     record.update(original_width=ow, original_height=oh, grid_thw=grid[0], Hm=hm, Wm=wm,
                   merge_size=merge, N=n, budget=args.budgets, K=k, K_focal=len(focal), K_spatial=len(spatial),
                   selected_indices=selected, focal_indices=focal, spatial_indices=spatial, tokens=tokens,
+                  fallback_count=int(visual.last_selector_fallback_count),
+                  distance_sigma=float(args.distance_sigma),
+                  duplicate_indices=len(selected) != len(set(selected)),
+                  out_of_bounds_indices=any(i < 0 or i >= n for i in selected),
                   raw_score_max_abs_error=float((raw[selected_tensor] - stored).abs().max()), **analysis)
     selection_type = np.zeros(n, dtype=np.uint8)
     selection_type[focal] = 1
@@ -205,7 +229,7 @@ def main():
     run_id = cli.run_id or datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "_" + uuid4().hex[:8]
     if Path(run_id).name != run_id or run_id in (".", ".."):
         raise ValueError("run-id must be a single directory name")
-    output = HERE / "audit_outputs" / run_id
+    output = cli.output_root.resolve() / run_id
     args, previous = baseline_args(cli, output)
     cub = CUBAnnotations(args.image_folder)
     import torch
@@ -266,7 +290,9 @@ def main():
     baseline.replace_layers(args, model)
     config["geometry"] = check_processor(processor)
     config["effective_selector"] = {name: getattr(model.visual, name) for name in
-        ("budgets", "spatial_ratio", "cosine_penalty_weight", "cosine_penalty_threshold", "selector_focal_redundancy_limit")}
+        ("budgets", "spatial_ratio", "cosine_penalty_weight", "cosine_penalty_threshold",
+         "selector_focal_redundancy_limit", "distance_aware_redundancy", "distance_sigma",
+         "distance_floor", "distance_apply_to")}
     config["environment"]["SELECTOR_STORE_VIS_ATTRS"] = "1"
     assert model.visual.selector_focal_redundancy_limit == 0
     write_json(output / "run_config.json", config)
@@ -300,12 +326,21 @@ def main():
                           prediction_raw=answer, prediction_parsed=baseline.parse_prediction(answer, args.choice_enumeration) if answer is not None else None,
                           gold_label=gold, options=choices, git_commit=commit, checkpoint=str(checkpoint), seed=args.seed,
                           run_config="run_config.json")
+            record["classification_correct"] = (
+                record["prediction_parsed"] == gold if gold is not None else None
+            )
             np.savez_compressed(output / "tokens" / f"{image_id:05d}.npz", **arrays)
             stream.write(json.dumps(record, ensure_ascii=False, allow_nan=False) + "\n")
             stream.flush()
             records.append(record)
             del arrays
-            print(f"[{j + 1}/{len(ids)}] image={image_id} K={record['K']} actionable={record['ActionableRedundancyCase']}", flush=True)
+            print(
+                f"[{j + 1}/{len(ids)}] image={image_id} N={record['N']} K={record['K']} "
+                f"focal={record['K_focal']} spatial={record['K_spatial']} "
+                f"sigma={record['distance_sigma']} fallback={record['fallback_count']} "
+                f"duplicate={record['duplicate_indices']} out_of_bounds={record['out_of_bounds_indices']}",
+                flush=True,
+            )
     if original:
         result, selections = original
         assert result["config"] == vars(args), "Baseline/audit config mismatch"

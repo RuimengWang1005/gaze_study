@@ -47,3 +47,20 @@ viscot_dataset/
 
 # Isolated diagnostic runs (never baseline result folders).
 qwen-evaluation1/audit_outputs/
+# Local experimental outputs
+qwen-evaluation1/results/
+qwen-evaluation1/review_pack/
+qwen-evaluation1/audit_outputs/
+
+# Model checkpoints
+output_ckpt*/
+**/output_ckpt*/
+
+# Logs and archives
+*.log
+*.zip
+
+# Python cache
+__pycache__/
+*.pyc
+.pytest_cache/

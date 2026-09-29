@@ -68,6 +68,17 @@ def resolve_spatial_ratio(args: argparse.Namespace, default: float = 0.1) -> flo
     return float(default if spatial_ratio is None else spatial_ratio)
 
 
+def parse_bool(value):
+    if isinstance(value, bool):
+        return value
+    normalized = str(value).strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise argparse.ArgumentTypeError(f"Expected a boolean, got {value!r}")
+
+
 def configure_processor_pixel_limits(
     processor: Qwen2_5_VLProcessor,
     min_pixels: int,
@@ -128,6 +139,16 @@ def load_model(args: argparse.Namespace):
         model.visual.config.cosine_penalty_threshold = (
             model.visual.cosine_penalty_threshold
         )
+        model.visual.distance_aware_redundancy = bool(args.distance_aware_redundancy)
+        model.visual.distance_sigma = float(args.distance_sigma)
+        model.visual.distance_floor = max(0.0, min(1.0, float(args.distance_floor)))
+        model.visual.distance_apply_to = str(args.distance_apply_to)
+        if model.visual.distance_sigma <= 0:
+            raise ValueError("distance_sigma must be positive")
+        if model.visual.distance_apply_to != "focal":
+            raise ValueError("Only distance_apply_to='focal' is supported")
+        for name in ("distance_aware_redundancy", "distance_sigma", "distance_floor", "distance_apply_to"):
+            setattr(model.visual.config, name, getattr(model.visual, name))
     elif method == "dynamic":
         model = Qwen2_5_VLForConditionalGeneration_Dynamic.from_pretrained(
             args.model_path, **model_args
@@ -447,6 +468,10 @@ def parse_args():
     parser.add_argument("--contextual_ratio", type=float, default=None)
     parser.add_argument("--cosine_penalty_weight", type=float, default=1.0)
     parser.add_argument("--cosine_penalty_threshold", type=float, default=0.7)
+    parser.add_argument("--distance_aware_redundancy", type=parse_bool, default=False)
+    parser.add_argument("--distance_sigma", type=float, default=0.1)
+    parser.add_argument("--distance_floor", type=float, default=0.0)
+    parser.add_argument("--distance_apply_to", choices=("focal",), default="focal")
 
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--top_p", type=float, default=None)
