@@ -50,6 +50,9 @@ def parse_args():
     p.add_argument("--output-root", type=Path, default=HERE / "audit_outputs")
     p.add_argument("--spatial-ratio-override", type=float)
     p.add_argument("--cosine-penalty-weight-override", type=float)
+    p.add_argument("--focal-redundancy-mode", choices=("global", "local"), default="global")
+    p.add_argument("--local-radius", type=int, default=1)
+    p.add_argument("--timing", action="store_true")
     p.add_argument("--distance-aware-redundancy", action="store_true")
     p.add_argument("--distance-sigma", type=float, default=.1)
     p.add_argument("--distance-floor", type=float, default=0.)
@@ -65,6 +68,10 @@ def parse_args():
         p.error("manifest requires cub-train and no limit")
     if args.distance_sigma <= 0 or not 0 <= args.distance_floor <= 1:
         p.error("distance sigma/floor out of range")
+    if args.local_radius < 0:
+        p.error("local radius must be non-negative")
+    if args.focal_redundancy_mode == "local" and args.distance_aware_redundancy:
+        p.error("local and distance-aware redundancy are mutually exclusive")
     return args
 
 
@@ -92,10 +99,13 @@ def baseline_args(cli, output):
     cfg.setdefault("distance_sigma", .1)
     cfg.setdefault("distance_floor", 0.)
     cfg.setdefault("distance_apply_to", "focal")
+    cfg.setdefault("focal_redundancy_mode", "global")
+    cfg.setdefault("local_radius", 1)
     cfg.update(budgets=cli.budget, limit=cli.limit, results_output_folder=str(output / "original_eval"),
                distance_aware_redundancy=cli.distance_aware_redundancy,
                distance_sigma=cli.distance_sigma, distance_floor=cli.distance_floor,
-               distance_apply_to=cli.distance_apply_to)
+               distance_apply_to=cli.distance_apply_to,
+               focal_redundancy_mode=cli.focal_redundancy_mode, local_radius=cli.local_radius)
     if cli.spatial_ratio_override is not None:
         cfg["spatial_ratio"] = cfg["contextual_ratio"] = cli.spatial_ratio_override
     if cli.cosine_penalty_weight_override is not None:
@@ -204,7 +214,16 @@ def snapshot(model, item, args, threshold):
                   merge_size=merge, N=n, budget=args.budgets, K=k, K_focal=len(focal), K_spatial=len(spatial),
                   selected_indices=selected, focal_indices=focal, spatial_indices=spatial, tokens=tokens,
                   fallback_count=int(visual.last_selector_fallback_count),
+                  focal_redundancy_mode=args.focal_redundancy_mode,
+                  local_radius=int(args.local_radius),
                   distance_sigma=float(args.distance_sigma),
+                  redundancy_diagnostics=visual.last_focal_redundancy_diagnostics,
+                  target_token_count=k,
+                  actual_retention_ratio=(len(selected) / n if n else 0.),
+                  duplicate_token_count=len(selected) - len(set(selected)),
+                  selector_score_select_time_ms=visual.last_selector_score_select_time_ms,
+                  vision_encoder_time_ms=visual.last_vision_encoder_time_ms,
+                  local_neighborhood_width=2 * int(args.local_radius) + 1,
                   duplicate_indices=len(selected) != len(set(selected)),
                   out_of_bounds_indices=any(i < 0 or i >= n for i in selected),
                   raw_score_max_abs_error=float((raw[selected_tensor] - stored).abs().max()), **analysis)
@@ -225,6 +244,8 @@ def snapshot(model, item, args, threshold):
 
 def main():
     cli = parse_args()
+    if cli.timing:
+        os.environ["EVAL_TIME"] = "true"
     cli.baseline_result = cli.baseline_result.resolve()
     run_id = cli.run_id or datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "_" + uuid4().hex[:8]
     if Path(run_id).name != run_id or run_id in (".", ".."):
@@ -275,7 +296,7 @@ def main():
               "options_path": options_path, "options_sha256": sha256(options_path),
               "environment": {k: os.environ[k] for k in (
                   "CUDA_VISIBLE_DEVICES", "HF_HUB_OFFLINE", "HF_DATASETS_OFFLINE", "HF_HUB_DISABLE_TELEMETRY",
-                  "TRANSFORMERS_OFFLINE", "NCCL_P2P_DISABLE", "NCCL_IB_DISABLE", "SELECTOR_STORE_VIS_ATTRS")
+                  "TRANSFORMERS_OFFLINE", "NCCL_P2P_DISABLE", "NCCL_IB_DISABLE", "SELECTOR_STORE_VIS_ATTRS", "EVAL_TIME")
                   if k in os.environ},
               "versions": {"python": sys.version, "torch": torch.__version__, "numpy": np.__version__},
               "source_hashes": {str(p.relative_to(REPO)): sha256(p) for p in
@@ -292,7 +313,7 @@ def main():
     config["effective_selector"] = {name: getattr(model.visual, name) for name in
         ("budgets", "spatial_ratio", "cosine_penalty_weight", "cosine_penalty_threshold",
          "selector_focal_redundancy_limit", "distance_aware_redundancy", "distance_sigma",
-         "distance_floor", "distance_apply_to")}
+         "distance_floor", "distance_apply_to", "focal_redundancy_mode", "local_radius")}
     config["environment"]["SELECTOR_STORE_VIS_ATTRS"] = "1"
     assert model.visual.selector_focal_redundancy_limit == 0
     write_json(output / "run_config.json", config)
@@ -337,7 +358,7 @@ def main():
             print(
                 f"[{j + 1}/{len(ids)}] image={image_id} N={record['N']} K={record['K']} "
                 f"focal={record['K_focal']} spatial={record['K_spatial']} "
-                f"sigma={record['distance_sigma']} fallback={record['fallback_count']} "
+                f"mode={record['focal_redundancy_mode']} radius={record['local_radius']} fallback={record['fallback_count']} "
                 f"duplicate={record['duplicate_indices']} out_of_bounds={record['out_of_bounds_indices']}",
                 flush=True,
             )

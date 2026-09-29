@@ -193,6 +193,66 @@ def _build_merged_token_coordinates(
     return torch.cat(coords), torch.cat(image_ids)
 
 
+def _build_merged_token_grid_metadata(
+    grid_thw: torch.Tensor,
+    merge_size: int,
+    device: torch.device,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Return merger-grid positions, isolated group ids, and temporal ids.
+
+    Qwen groups each ``merge_size x merge_size`` patch block before the
+    PatchMerger and restores the resulting sequence to ``(t, row, col)`` order.
+    A separate group id per image/frame prevents local neighborhoods from
+    crossing image or temporal boundaries.
+    """
+    if not isinstance(grid_thw, torch.Tensor):
+        raise TypeError("grid_thw must be a tensor")
+    if grid_thw.dim() == 1:
+        grid_thw = grid_thw.unsqueeze(0)
+    if grid_thw.dim() != 2 or grid_thw.shape[1] < 3:
+        raise ValueError("grid_thw must have shape [num_grids, >=3]")
+    if isinstance(merge_size, bool) or not isinstance(merge_size, int) or merge_size <= 0:
+        raise ValueError("merge_size must be a positive integer")
+
+    positions: List[torch.Tensor] = []
+    group_ids: List[torch.Tensor] = []
+    temporal_ids: List[torch.Tensor] = []
+    next_group_id = 0
+    for entry in grid_thw.to(dtype=torch.long).tolist():
+        t, h, w = map(int, entry[:3])
+        if t <= 0 or h <= 0 or w <= 0:
+            raise ValueError("grid_thw entries must be positive")
+        if h % merge_size != 0 or w % merge_size != 0:
+            raise ValueError("grid height and width must be divisible by merge_size")
+        h_m, w_m = h // merge_size, w // merge_size
+        rows = torch.arange(h_m, device=device, dtype=torch.long)
+        cols = torch.arange(w_m, device=device, dtype=torch.long)
+        rr, cc = torch.meshgrid(rows, cols, indexing="ij")
+        frame_positions = torch.stack((rr.reshape(-1), cc.reshape(-1)), dim=-1)
+        tokens_per_frame = int(frame_positions.shape[0])
+        for temporal_id in range(t):
+            positions.append(frame_positions)
+            group_ids.append(
+                torch.full(
+                    (tokens_per_frame,), next_group_id, device=device, dtype=torch.long
+                )
+            )
+            temporal_ids.append(
+                torch.full(
+                    (tokens_per_frame,), temporal_id, device=device, dtype=torch.long
+                )
+            )
+            next_group_id += 1
+
+    if not positions:
+        return (
+            torch.empty((0, 2), device=device, dtype=torch.long),
+            torch.empty((0,), device=device, dtype=torch.long),
+            torch.empty((0,), device=device, dtype=torch.long),
+        )
+    return torch.cat(positions), torch.cat(group_ids), torch.cat(temporal_ids)
+
+
 def _normalize_cosine_params(
     penalty_weight: float,
     similarity_threshold: float,
@@ -355,6 +415,326 @@ def _select_indices_with_cosine_penalty(
     return torch.tensor(selected, dtype=torch.long, device=scores.device)
 
 
+def _compute_local_max_similarity(
+    similarity: torch.Tensor,
+    candidate_positions: torch.Tensor,
+    selected_positions: torch.Tensor,
+    candidate_group_ids: torch.Tensor,
+    selected_group_ids: torch.Tensor,
+    radius: int,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Mask a cosine matrix to valid local pairs and return finite row maxima."""
+    if isinstance(radius, bool) or not isinstance(radius, int):
+        raise TypeError("local_radius must be an integer")
+    if radius < 0:
+        raise ValueError("local_radius must be non-negative")
+    if similarity.dim() != 2:
+        raise ValueError("similarity must have shape [num_candidates,num_selected]")
+    num_candidates, num_selected = similarity.shape
+    if candidate_positions.shape != (num_candidates, 2):
+        raise ValueError("candidate_positions must have shape [num_candidates,2]")
+    if selected_positions.shape != (num_selected, 2):
+        raise ValueError("selected_positions must have shape [num_selected,2]")
+    if candidate_group_ids.shape != (num_candidates,):
+        raise ValueError("candidate_group_ids must have shape [num_candidates]")
+    if selected_group_ids.shape != (num_selected,):
+        raise ValueError("selected_group_ids must have shape [num_selected]")
+    metadata = (
+        candidate_positions,
+        selected_positions,
+        candidate_group_ids,
+        selected_group_ids,
+    )
+    if any(tensor.device != similarity.device for tensor in metadata):
+        raise ValueError("similarity and local metadata must share a device")
+    if any(tensor.dtype.is_floating_point for tensor in metadata):
+        raise TypeError("positions and group ids must use integer dtypes")
+    if num_candidates == 0 or num_selected == 0:
+        return (
+            torch.zeros(
+                (num_candidates,), device=similarity.device, dtype=similarity.dtype
+            ),
+            torch.zeros((num_candidates,), device=similarity.device, dtype=torch.bool),
+        )
+
+    delta = (
+        candidate_positions[:, None, :] - selected_positions[None, :, :]
+    ).abs()
+    local_mask = (
+        candidate_group_ids[:, None] == selected_group_ids[None, :]
+    ) & (torch.maximum(delta[..., 0], delta[..., 1]) <= radius)
+    has_local_neighbor = local_mask.any(dim=-1)
+    masked_similarity = similarity.masked_fill(~local_mask, float("-inf"))
+    local_max_similarity = masked_similarity.max(dim=-1).values
+    local_max_similarity = torch.where(
+        has_local_neighbor,
+        local_max_similarity,
+        torch.zeros_like(local_max_similarity),
+    )
+    return local_max_similarity, has_local_neighbor
+
+
+def _validate_local_redundancy_inputs(
+    scores: torch.Tensor,
+    token_features: Optional[torch.Tensor],
+    token_positions: torch.Tensor,
+    token_group_ids: torch.Tensor,
+    radius: int,
+) -> None:
+    total = int(scores.numel())
+    if isinstance(radius, bool) or not isinstance(radius, int):
+        raise TypeError("local_radius must be an integer")
+    if radius < 0:
+        raise ValueError("local_radius must be non-negative")
+    if token_features is None or token_features.dim() != 2:
+        raise ValueError("token_features must have shape [N,D]")
+    if token_features.shape[0] != total:
+        raise ValueError("token feature count must match score count")
+    if token_positions.shape != (total, 2):
+        raise ValueError("token_positions must have shape [N,2]")
+    if token_group_ids.shape != (total,):
+        raise ValueError("token_group_ids must have shape [N]")
+    if token_positions.dtype.is_floating_point:
+        raise TypeError("token_positions must use an integer dtype")
+    if token_group_ids.dtype.is_floating_point:
+        raise TypeError("token_group_ids must use an integer dtype")
+    tensors = (token_features, token_positions, token_group_ids)
+    if any(tensor.device != scores.device for tensor in tensors):
+        raise ValueError("scores, features, positions, and group ids must share a device")
+
+
+@torch.no_grad()
+def _select_indices_with_local_cosine_penalty(
+    scores: torch.Tensor,
+    token_features: torch.Tensor,
+    token_positions: torch.Tensor,
+    token_group_ids: torch.Tensor,
+    k: int,
+    penalty_weight: float,
+    similarity_threshold: float,
+    radius: int,
+    diagnostics: Optional[dict] = None,
+) -> torch.Tensor:
+    """Original greedy Focal selection with locally scoped redundancy only."""
+    _validate_local_redundancy_inputs(
+        scores, token_features, token_positions, token_group_ids, radius
+    )
+    total = int(scores.numel())
+    if total == 0 or k <= 0:
+        return torch.empty((0,), dtype=torch.long, device=scores.device)
+    k = min(int(k), total)
+    if k >= total:
+        return torch.arange(total, dtype=torch.long, device=scores.device)
+
+    penalty_weight, similarity_threshold = _normalize_cosine_params(
+        penalty_weight, similarity_threshold
+    )
+    if penalty_weight <= 0.0:
+        return torch.topk(scores, k=k, dim=0, largest=True).indices
+
+    feat = F.normalize(token_features.to(dtype=torch.float32), p=2, dim=-1, eps=1e-6)
+    positions = token_positions.to(dtype=torch.long)
+    group_ids = token_group_ids.to(dtype=torch.long)
+    base_scores = scores.to(dtype=torch.float32)
+    max_sim = torch.full(
+        (total,), float("-inf"), device=scores.device, dtype=torch.float32
+    )
+    has_local_neighbor = torch.zeros(total, device=scores.device, dtype=torch.bool)
+    selected_mask = torch.zeros(total, device=scores.device, dtype=torch.bool)
+    selected: List[int] = []
+
+    def update_local_similarity(index: int) -> None:
+        nonlocal max_sim, has_local_neighbor
+        similarity = torch.matmul(feat, feat[index]).unsqueeze(1)
+        local_similarity, local_neighbor = _compute_local_max_similarity(
+            similarity,
+            positions,
+            positions[index : index + 1],
+            group_ids,
+            group_ids[index : index + 1],
+            radius,
+        )
+        # Keep missing neighbors at -inf while accumulating valid selected pairs.
+        local_similarity = local_similarity.masked_fill(
+            ~local_neighbor, float("-inf")
+        )
+        max_sim = torch.maximum(max_sim, local_similarity)
+        has_local_neighbor = has_local_neighbor | local_neighbor
+
+    def finite_max_similarity() -> torch.Tensor:
+        return torch.where(
+            has_local_neighbor, max_sim, torch.zeros_like(max_sim)
+        )
+
+    seed_idx = int(torch.argmax(base_scores).item())
+    selected_mask[seed_idx] = True
+    selected.append(seed_idx)
+    lambda_eff = 0.0
+    if len(selected) < k:
+        update_local_similarity(seed_idx)
+        penalty_base = torch.relu(finite_max_similarity() - similarity_threshold)
+        candidate_mask = ~selected_mask
+        lambda_eff = _compute_scale_matched_lambda(
+            base_scores[candidate_mask],
+            penalty_base[candidate_mask],
+            alpha=penalty_weight,
+        )
+
+    while len(selected) < k:
+        local_max_similarity = finite_max_similarity()
+        penalty_base = torch.relu(local_max_similarity - similarity_threshold)
+        penalized = (base_scores - lambda_eff * penalty_base).masked_fill(
+            selected_mask, float("-inf")
+        )
+        next_idx = int(torch.argmax(penalized).item())
+        if selected_mask[next_idx] or not torch.isfinite(penalized[next_idx]):
+            break
+        selected_mask[next_idx] = True
+        selected.append(next_idx)
+        if len(selected) < k:
+            update_local_similarity(next_idx)
+
+    if len(selected) < k:
+        remaining = torch.where(~selected_mask)[0]
+        need = min(k - len(selected), int(remaining.numel()))
+        if need > 0:
+            top_rel = torch.topk(base_scores[remaining], k=need, largest=True).indices
+            selected.extend(remaining[top_rel].tolist())
+
+    if diagnostics is not None:
+        diagnostics.setdefault("fallback_count", 0)
+
+    return torch.tensor(selected, dtype=torch.long, device=scores.device)
+
+
+@torch.no_grad()
+def _compute_focal_redundancy_diagnostics(
+    scores: torch.Tensor,
+    token_features: torch.Tensor,
+    selected_indices: torch.Tensor,
+    token_positions: torch.Tensor,
+    token_group_ids: torch.Tensor,
+    mode: str,
+    radius: int,
+    penalty_weight: float,
+    similarity_threshold: float,
+) -> dict:
+    """Compute read-only paired Global/Local redundancy diagnostics."""
+    _validate_local_redundancy_inputs(
+        scores, token_features, token_positions, token_group_ids, radius
+    )
+    if mode not in {"global", "local"}:
+        raise ValueError(f"Unknown focal redundancy mode: {mode!r}")
+    penalty_weight, similarity_threshold = _normalize_cosine_params(
+        penalty_weight, similarity_threshold
+    )
+    total = int(scores.numel())
+    selected_indices = selected_indices.to(device=scores.device, dtype=torch.long)
+    selected_mask = torch.zeros(total, device=scores.device, dtype=torch.bool)
+    if selected_indices.numel() > 0:
+        if (
+            int(selected_indices.min()) < 0
+            or int(selected_indices.max()) >= total
+            or selected_indices.unique().numel() != selected_indices.numel()
+        ):
+            raise ValueError("selected focal indices must be unique and in bounds")
+        selected_mask.scatter_(0, selected_indices, True)
+    candidate_indices = torch.where(~selected_mask)[0]
+    result = {
+        "mode": mode,
+        "radius": radius,
+        "adaptive_alpha": penalty_weight,
+        "similarity_threshold": similarity_threshold,
+        "num_candidates": int(candidate_indices.numel()),
+        "num_selected": int(selected_indices.numel()),
+        "max_similarity": [],
+        "penalty_base": [],
+        "global_argmax_grid_distances": [],
+        "global_argmax_outside_local_ratio": 0.0,
+        "empty_local_neighbor_ratio": 0.0,
+        "nonzero_penalty_ratio": 0.0,
+        "mean_penalty": 0.0,
+        "score_iqr": 0.0,
+        "penalty_iqr": 0.0,
+        "lambda_eff": 0.0,
+    }
+    if candidate_indices.numel() == 0 or selected_indices.numel() == 0:
+        return result
+
+    feat = F.normalize(token_features.to(dtype=torch.float32), p=2, dim=-1, eps=1e-6)
+    similarity = torch.matmul(
+        feat[candidate_indices], feat[selected_indices].transpose(0, 1)
+    )
+    global_raw_max, global_argmax = similarity.max(dim=-1)
+    # Match the original Global selector, whose running max starts at finite zero.
+    global_max = torch.maximum(global_raw_max, torch.zeros_like(global_raw_max))
+    local_max, has_local_neighbor = _compute_local_max_similarity(
+        similarity,
+        token_positions[candidate_indices],
+        token_positions[selected_indices],
+        token_group_ids[candidate_indices],
+        token_group_ids[selected_indices],
+        radius,
+    )
+    mode_max = global_max if mode == "global" else local_max
+    penalty_base = torch.relu(mode_max - similarity_threshold)
+
+    seed_idx = int(torch.argmax(scores.to(dtype=torch.float32)).item())
+    calibration_mask = torch.ones(total, device=scores.device, dtype=torch.bool)
+    calibration_mask[seed_idx] = False
+    seed_similarity = torch.matmul(feat[calibration_mask], feat[seed_idx]).unsqueeze(1)
+    if mode == "local":
+        seed_max, _ = _compute_local_max_similarity(
+            seed_similarity,
+            token_positions[calibration_mask],
+            token_positions[seed_idx : seed_idx + 1],
+            token_group_ids[calibration_mask],
+            token_group_ids[seed_idx : seed_idx + 1],
+            radius,
+        )
+    else:
+        seed_max = torch.maximum(
+            seed_similarity.squeeze(1),
+            torch.zeros_like(seed_similarity.squeeze(1)),
+        )
+    calibration_scores = scores.to(dtype=torch.float32)[calibration_mask]
+    calibration_penalty = torch.relu(seed_max - similarity_threshold)
+    lambda_eff = _compute_scale_matched_lambda(
+        calibration_scores, calibration_penalty, alpha=penalty_weight
+    )
+
+    global_selected = selected_indices[global_argmax]
+    global_same_group = (
+        token_group_ids[candidate_indices] == token_group_ids[global_selected]
+    )
+    global_delta = (
+        token_positions[candidate_indices] - token_positions[global_selected]
+    ).abs()
+    global_distance = torch.maximum(global_delta[:, 0], global_delta[:, 1])
+    outside_local = (~global_same_group) | (global_distance > radius)
+    distance_values = [
+        int(distance) if same_group else None
+        for distance, same_group in zip(
+            global_distance.detach().cpu().tolist(),
+            global_same_group.detach().cpu().tolist(),
+        )
+    ]
+
+    result.update(
+        max_similarity=mode_max.detach().cpu().tolist(),
+        penalty_base=penalty_base.detach().cpu().tolist(),
+        global_argmax_grid_distances=distance_values,
+        global_argmax_outside_local_ratio=float(outside_local.float().mean().item()),
+        empty_local_neighbor_ratio=float((~has_local_neighbor).float().mean().item()),
+        nonzero_penalty_ratio=float((penalty_base > 0).float().mean().item()),
+        mean_penalty=float((lambda_eff * penalty_base).mean().item()),
+        score_iqr=float(_robust_iqr(calibration_scores).item()),
+        penalty_iqr=float(_robust_iqr(calibration_penalty).item()),
+        lambda_eff=lambda_eff,
+    )
+    return result
+
+
 @torch.no_grad()
 def _select_indices_with_distance_aware_penalty(
     scores: torch.Tensor,
@@ -458,8 +838,32 @@ def _select_focal_indices(
     distance_sigma: float = 0.1,
     distance_floor: float = 0.0,
     diagnostics: Optional[dict] = None,
+    focal_redundancy_mode: str = "global",
+    local_radius: int = 1,
+    token_positions: Optional[torch.Tensor] = None,
+    token_group_ids: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
-    """Route focal selection while preserving the disabled legacy call exactly."""
+    """Route Focal selection while preserving the Global call exactly."""
+    if focal_redundancy_mode not in {"global", "local"}:
+        raise ValueError(f"Unknown focal_redundancy_mode={focal_redundancy_mode!r}")
+    if focal_redundancy_mode == "local":
+        if distance_aware_redundancy:
+            raise ValueError(
+                "Local and distance-aware Focal redundancy are mutually exclusive"
+            )
+        if token_positions is None or token_group_ids is None:
+            raise ValueError("Local Focal selection requires positions and group ids")
+        return _select_indices_with_local_cosine_penalty(
+            scores,
+            token_features,
+            token_positions,
+            token_group_ids,
+            k,
+            penalty_weight,
+            similarity_threshold,
+            local_radius,
+            diagnostics,
+        )
     if not distance_aware_redundancy:
         return _select_indices_with_cosine_penalty(
             scores, token_features, k, penalty_weight, similarity_threshold
@@ -556,6 +960,23 @@ class Qwen2_5_VisionTransformerPretrainedModel_Selector(Qwen2_5_VisionTransforme
         self.distance_apply_to = str(getattr(config, "distance_apply_to", "focal"))
         if self.distance_apply_to != "focal":
             raise ValueError("Only distance_apply_to='focal' is supported")
+
+        self.focal_redundancy_mode = str(
+            getattr(config, "focal_redundancy_mode", "global")
+        )
+        if self.focal_redundancy_mode not in {"global", "local"}:
+            raise ValueError(
+                f"Unknown focal_redundancy_mode={self.focal_redundancy_mode!r}"
+            )
+        self.local_radius = getattr(config, "local_radius", 1)
+        if isinstance(self.local_radius, bool) or not isinstance(self.local_radius, int):
+            raise TypeError("local_radius must be an integer")
+        if self.local_radius < 0:
+            raise ValueError("local_radius must be non-negative")
+        if self.focal_redundancy_mode == "local" and self.distance_aware_redundancy:
+            raise ValueError(
+                "Local and distance-aware Focal redundancy are mutually exclusive"
+            )
         self.selector_focal_redundancy_limit = max(
             0,
             int(
@@ -583,6 +1004,7 @@ class Qwen2_5_VisionTransformerPretrainedModel_Selector(Qwen2_5_VisionTransforme
         self.last_focal_features = None
         self.last_spatial_features = None
         self.last_selector_fallback_count = 0
+        self.last_focal_redundancy_diagnostics = None
         self.last_vision_encoder_time_ms = None
         self.last_selector_score_select_time_ms = None
         self._last_vision_encoder_start_event = None
@@ -595,6 +1017,11 @@ class Qwen2_5_VisionTransformerPretrainedModel_Selector(Qwen2_5_VisionTransforme
         hidden_states: torch.Tensor, 
         grid_thw: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor, int]:
+        # Local redundancy is enabled only for inference-time Focal selection.
+        if getattr(self, "focal_redundancy_mode", "global") == "local" and self.training:
+            raise RuntimeError(
+                "Local Focal redundancy is inference-only; call model.eval()"
+            )
         timing_enabled = os.environ.get("EVAL_TIME", "").lower() == "true"
         use_cuda_timing = bool(timing_enabled and hidden_states.is_cuda)
         vision_encoder_start_time = None
@@ -673,6 +1100,7 @@ class Qwen2_5_VisionTransformerPretrainedModel_Selector(Qwen2_5_VisionTransforme
         focal_indices = None
         spatial_indices = None
         self.last_selector_fallback_count = 0
+        self.last_focal_redundancy_diagnostics = None
         
         # hidden_states: [N, D] -> unsqueeze -> [1, N, D]
         hidden_states_unsqueezed = hidden_states.unsqueeze(0) 
@@ -710,6 +1138,29 @@ class Qwen2_5_VisionTransformerPretrainedModel_Selector(Qwen2_5_VisionTransforme
             )
             use_distance_focal = bool(getattr(self, "distance_aware_redundancy", False))
             distance_diagnostics = {"fallback_count": 0}
+
+            focal_redundancy_mode = str(
+                getattr(self, "focal_redundancy_mode", "global")
+            )
+            local_radius = getattr(self, "local_radius", 1)
+            token_positions = None
+            token_group_ids = None
+            if focal_redundancy_mode == "local":
+                if use_distance_focal:
+                    raise ValueError(
+                        "Local and distance-aware Focal redundancy are mutually exclusive"
+                    )
+                token_positions, token_group_ids, _ = _build_merged_token_grid_metadata(
+                    grid_thw,
+                    max(1, int(getattr(self, "spatial_merge_size", 2))),
+                    hidden_states.device,
+                )
+                if token_positions.shape[0] != learned_scores.shape[-1]:
+                    raise ValueError("Position count does not match VIS score count")
+                if token_positions.shape[0] != hidden_states.shape[-2]:
+                    raise ValueError("Position count does not match visual feature count")
+                if token_group_ids.shape[0] != token_positions.shape[0]:
+                    raise ValueError("Group-id count does not match position count")
             if use_distance_focal:
                 if getattr(self, "distance_apply_to", "focal") != "focal":
                     raise ValueError("Only distance_apply_to='focal' is supported")
@@ -728,6 +1179,8 @@ class Qwen2_5_VisionTransformerPretrainedModel_Selector(Qwen2_5_VisionTransforme
                     token_coordinates if use_distance_focal else None,
                     token_image_ids if use_distance_focal else None,
                     self.distance_sigma, self.distance_floor, distance_diagnostics,
+                    focal_redundancy_mode, local_radius,
+                    token_positions, token_group_ids,
                 )
                 if focal_indices.numel() != focal_seed_k:
                     self.last_selector_fallback_count += 1
@@ -754,12 +1207,41 @@ class Qwen2_5_VisionTransformerPretrainedModel_Selector(Qwen2_5_VisionTransforme
                     token_coordinates if use_distance_focal else None,
                     token_image_ids if use_distance_focal else None,
                     self.distance_sigma, self.distance_floor, distance_diagnostics,
+                    focal_redundancy_mode, local_radius,
+                    token_positions, token_group_ids,
                 )
             self.last_selector_fallback_count += int(distance_diagnostics["fallback_count"])
             if focal_indices.numel() != k_foc:
                 self.last_selector_fallback_count += 1
                 focal_indices = torch.topk(learned_scores, k_foc, dim=0).indices
             focal_indices, _ = torch.sort(focal_indices)
+
+            if _should_store_selector_visualization_attrs() and not use_distance_focal:
+                diagnostic_positions = token_positions
+                diagnostic_group_ids = token_group_ids
+                if diagnostic_positions is None or diagnostic_group_ids is None:
+                    (
+                        diagnostic_positions,
+                        diagnostic_group_ids,
+                        _,
+                    ) = _build_merged_token_grid_metadata(
+                        grid_thw,
+                        max(1, int(getattr(self, "spatial_merge_size", 2))),
+                        hidden_states.device,
+                    )
+                self.last_focal_redundancy_diagnostics = (
+                    _compute_focal_redundancy_diagnostics(
+                        learned_scores,
+                        hidden_states,
+                        focal_indices,
+                        diagnostic_positions,
+                        diagnostic_group_ids,
+                        focal_redundancy_mode,
+                        local_radius,
+                        cosine_penalty_weight,
+                        cosine_penalty_threshold,
+                    )
+                )
 
             if spa_budget == 0:
                 all_indices = focal_indices
