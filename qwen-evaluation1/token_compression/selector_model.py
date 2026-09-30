@@ -619,15 +619,17 @@ def _compute_focal_redundancy_diagnostics(
     penalty_weight: float,
     similarity_threshold: float,
 ) -> dict:
-    """Compute read-only paired Global/Local redundancy diagnostics."""
+    """Compute read-only Global/Local/NoRedundancy diagnostics."""
     _validate_local_redundancy_inputs(
         scores, token_features, token_positions, token_group_ids, radius
     )
-    if mode not in {"global", "local"}:
+    if mode not in {"global", "local", "none"}:
         raise ValueError(f"Unknown focal redundancy mode: {mode!r}")
     penalty_weight, similarity_threshold = _normalize_cosine_params(
         penalty_weight, similarity_threshold
     )
+    if mode == "none":
+        penalty_weight = 0.0
     total = int(scores.numel())
     selected_indices = selected_indices.to(device=scores.device, dtype=torch.long)
     selected_mask = torch.zeros(total, device=scores.device, dtype=torch.bool)
@@ -676,8 +678,13 @@ def _compute_focal_redundancy_diagnostics(
         token_group_ids[selected_indices],
         radius,
     )
-    mode_max = global_max if mode == "global" else local_max
-    penalty_base = torch.relu(mode_max - similarity_threshold)
+    if mode == "global":
+        mode_max = global_max
+    elif mode == "local":
+        mode_max = local_max
+    else:
+        mode_max = torch.zeros_like(global_max)
+    penalty_base = torch.zeros_like(mode_max) if mode == "none" else torch.relu(mode_max - similarity_threshold)
 
     seed_idx = int(torch.argmax(scores.to(dtype=torch.float32)).item())
     calibration_mask = torch.ones(total, device=scores.device, dtype=torch.bool)
@@ -692,13 +699,15 @@ def _compute_focal_redundancy_diagnostics(
             token_group_ids[seed_idx : seed_idx + 1],
             radius,
         )
-    else:
+    elif mode == "global":
         seed_max = torch.maximum(
             seed_similarity.squeeze(1),
             torch.zeros_like(seed_similarity.squeeze(1)),
         )
+    else:
+        seed_max = torch.zeros_like(seed_similarity.squeeze(1))
     calibration_scores = scores.to(dtype=torch.float32)[calibration_mask]
-    calibration_penalty = torch.relu(seed_max - similarity_threshold)
+    calibration_penalty = torch.zeros_like(seed_max) if mode == "none" else torch.relu(seed_max - similarity_threshold)
     lambda_eff = _compute_scale_matched_lambda(
         calibration_scores, calibration_penalty, alpha=penalty_weight
     )
@@ -844,8 +853,16 @@ def _select_focal_indices(
     token_group_ids: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """Route Focal selection while preserving the Global call exactly."""
-    if focal_redundancy_mode not in {"global", "local"}:
+    if focal_redundancy_mode not in {"global", "local", "none"}:
         raise ValueError(f"Unknown focal_redundancy_mode={focal_redundancy_mode!r}")
+    if focal_redundancy_mode == "none":
+        if distance_aware_redundancy:
+            raise ValueError(
+                "NoRedundancy and distance-aware Focal redundancy are mutually exclusive"
+            )
+        return _select_indices_with_cosine_penalty(
+            scores, None, k, 0.0, similarity_threshold
+        )
     if focal_redundancy_mode == "local":
         if distance_aware_redundancy:
             raise ValueError(
@@ -964,7 +981,7 @@ class Qwen2_5_VisionTransformerPretrainedModel_Selector(Qwen2_5_VisionTransforme
         self.focal_redundancy_mode = str(
             getattr(config, "focal_redundancy_mode", "global")
         )
-        if self.focal_redundancy_mode not in {"global", "local"}:
+        if self.focal_redundancy_mode not in {"global", "local", "none"}:
             raise ValueError(
                 f"Unknown focal_redundancy_mode={self.focal_redundancy_mode!r}"
             )
@@ -973,9 +990,9 @@ class Qwen2_5_VisionTransformerPretrainedModel_Selector(Qwen2_5_VisionTransforme
             raise TypeError("local_radius must be an integer")
         if self.local_radius < 0:
             raise ValueError("local_radius must be non-negative")
-        if self.focal_redundancy_mode == "local" and self.distance_aware_redundancy:
+        if self.focal_redundancy_mode != "global" and self.distance_aware_redundancy:
             raise ValueError(
-                "Local and distance-aware Focal redundancy are mutually exclusive"
+                "Local/NoRedundancy and distance-aware Focal redundancy are mutually exclusive"
             )
         self.selector_focal_redundancy_limit = max(
             0,

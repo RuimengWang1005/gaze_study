@@ -50,7 +50,7 @@ def parse_args():
     p.add_argument("--output-root", type=Path, default=HERE / "audit_outputs")
     p.add_argument("--spatial-ratio-override", type=float)
     p.add_argument("--cosine-penalty-weight-override", type=float)
-    p.add_argument("--focal-redundancy-mode", choices=("global", "local"), default="global")
+    p.add_argument("--focal-redundancy-mode", choices=("global", "local", "none"), default="global")
     p.add_argument("--local-radius", type=int, default=1)
     p.add_argument("--timing", action="store_true")
     p.add_argument("--distance-aware-redundancy", action="store_true")
@@ -70,8 +70,8 @@ def parse_args():
         p.error("distance sigma/floor out of range")
     if args.local_radius < 0:
         p.error("local radius must be non-negative")
-    if args.focal_redundancy_mode == "local" and args.distance_aware_redundancy:
-        p.error("local and distance-aware redundancy are mutually exclusive")
+    if args.focal_redundancy_mode != "global" and args.distance_aware_redundancy:
+        p.error("local/none and distance-aware redundancy are mutually exclusive")
     return args
 
 

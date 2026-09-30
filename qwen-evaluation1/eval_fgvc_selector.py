@@ -149,8 +149,8 @@ def load_model(args: argparse.Namespace):
             raise ValueError("distance_sigma must be positive")
         if model.visual.distance_apply_to != "focal":
             raise ValueError("Only distance_apply_to='focal' is supported")
-        if model.visual.focal_redundancy_mode not in {"global", "local"}:
-            raise ValueError("focal_redundancy_mode must be 'global' or 'local'")
+        if model.visual.focal_redundancy_mode not in {"global", "local", "none"}:
+            raise ValueError("focal_redundancy_mode must be 'global', 'local', or 'none'")
         if (
             isinstance(model.visual.local_radius, bool)
             or not isinstance(model.visual.local_radius, int)
@@ -158,11 +158,11 @@ def load_model(args: argparse.Namespace):
         ):
             raise ValueError("local_radius must be a non-negative integer")
         if (
-            model.visual.focal_redundancy_mode == "local"
+            model.visual.focal_redundancy_mode != "global"
             and model.visual.distance_aware_redundancy
         ):
             raise ValueError(
-                "Local and distance-aware Focal redundancy are mutually exclusive"
+                "Local/NoRedundancy and distance-aware Focal redundancy are mutually exclusive"
             )
         for name in (
             "distance_aware_redundancy", "distance_sigma", "distance_floor",
@@ -489,7 +489,7 @@ def parse_args():
     parser.add_argument("--contextual_ratio", type=float, default=None)
     parser.add_argument("--cosine_penalty_weight", type=float, default=1.0)
     parser.add_argument("--cosine_penalty_threshold", type=float, default=0.7)
-    parser.add_argument("--focal-redundancy-mode", choices=("global", "local"), default="global")
+    parser.add_argument("--focal-redundancy-mode", choices=("global", "local", "none"), default="global")
     parser.add_argument("--local-radius", type=int, default=1)
     parser.add_argument("--distance_aware_redundancy", type=parse_bool, default=False)
     parser.add_argument("--distance_sigma", type=float, default=0.1)

@@ -10,6 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from token_compression.selector_model import (
     _build_merged_token_grid_metadata,
+    _compute_focal_redundancy_diagnostics,
     _compute_local_max_similarity,
     _select_focal_indices,
     _select_indices_with_cosine_penalty,
@@ -178,6 +179,55 @@ def test_global_dispatch_remains_exact_legacy_call():
     expected = _select_indices_with_cosine_penalty(scores, features, 6, 1.0, 0.7)
     actual = _select_focal_indices(scores, features, 6, 1.0, 0.7)
     assert torch.equal(expected, actual)
+
+
+def test_none_dispatch_is_exact_importance_topk():
+    scores = torch.tensor([0.2, 0.9, 0.5, 0.8, 0.1])
+    features = torch.randn(5, 3, generator=torch.Generator().manual_seed(11))
+    expected = torch.topk(scores, k=3, largest=True).indices
+    actual = _select_focal_indices(
+        scores,
+        features,
+        3,
+        penalty_weight=999.0,
+        similarity_threshold=-1.0,
+        focal_redundancy_mode="none",
+    )
+    assert torch.equal(expected, actual)
+
+
+def test_none_diagnostics_have_zero_effective_redundancy():
+    scores = torch.tensor([0.9, 0.8, 0.7, 0.6])
+    features = torch.tensor([[1.0, 0.0], [1.0, 0.0], [0.0, 1.0], [1.0, 0.0]])
+    diagnostics = _compute_focal_redundancy_diagnostics(
+        scores,
+        features,
+        torch.tensor([0, 1]),
+        torch.tensor([[0, 0], [0, 1], [0, 2], [0, 3]]),
+        torch.zeros(4, dtype=torch.long),
+        mode="none",
+        radius=1,
+        penalty_weight=1.0,
+        similarity_threshold=-1.0,
+    )
+    assert diagnostics["mode"] == "none"
+    assert diagnostics["adaptive_alpha"] == 0.0
+    assert diagnostics["lambda_eff"] == 0.0
+    assert diagnostics["max_similarity"] == [0.0, 0.0]
+    assert diagnostics["penalty_base"] == [0.0, 0.0]
+
+
+def test_none_and_distance_aware_modes_are_mutually_exclusive():
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        _select_focal_indices(
+            torch.tensor([1.0, 0.5]),
+            torch.eye(2),
+            1,
+            1.0,
+            0.7,
+            distance_aware_redundancy=True,
+            focal_redundancy_mode="none",
+        )
 
 
 def test_local_and_distance_aware_modes_are_mutually_exclusive():
