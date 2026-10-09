@@ -78,6 +78,7 @@ def run_stage_a_tests(output_dir: Path) -> None:
     tests = [
         str(SCRIPT_DIR / "tests" / "test_head_attention_capture.py"),
         str(SCRIPT_DIR / "tests" / "test_head_token_mapping.py"),
+        str(SCRIPT_DIR / "tests" / "test_head_signal_analysis.py"),
     ]
     completed = _run([sys.executable, "-m", "pytest", "-q", *tests])
     report = completed.stdout + ("\n" + completed.stderr if completed.stderr else "")

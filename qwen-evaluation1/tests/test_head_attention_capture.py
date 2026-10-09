@@ -39,6 +39,9 @@ def test_capture_matches_original_eager_attention_and_restores_forward():
     assert torch.allclose(captured_output, reference, atol=1e-6, rtol=1e-6)
     assert capture.attention_probs is not None
     assert capture.attention_probs.shape == (1, 4, 8, 8)
+    assert capture.value_norms is not None
+    assert capture.value_norms.shape == (1, 4, 8)
+    assert torch.all(capture.value_norms >= 0)
 
 
 def test_attention_and_incoming_scores_are_normalized_per_head():

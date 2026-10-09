@@ -56,7 +56,7 @@ def eager_attention_forward(
     cu_seqlens: torch.Tensor,
     rotary_pos_emb: Optional[torch.Tensor] = None,
     position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
-    capture_callback: Optional[Callable[[torch.Tensor], None]] = None,
+    capture_callback: Optional[Callable[[torch.Tensor, torch.Tensor], None]] = None,
 ) -> torch.Tensor:
     """Run exact per-head eager attention and optionally capture probabilities.
 
@@ -97,7 +97,7 @@ def eager_attention_forward(
     attention_probs = torch.matmul(q, k.transpose(1, 2)) / math.sqrt(head_dim)
     attention_probs = torch.softmax(attention_probs + attention_mask, dim=-1, dtype=torch.float32).to(q.dtype)
     if capture_callback is not None:
-        capture_callback(attention_probs.unsqueeze(0))
+        capture_callback(attention_probs.unsqueeze(0), v.unsqueeze(0))
 
     output = torch.matmul(attention_probs, v)
     output = output.transpose(0, 1).reshape(seq_length, qkv_dim)
@@ -119,15 +119,17 @@ class AttentionCapture:
         self.module = module
         self.capture = capture
         self.attention_probs: Optional[torch.Tensor] = None
+        self.value_norms: Optional[torch.Tensor] = None
         self.metadata: Optional[CaptureMetadata] = None
         self._original_forward = None
 
-    def _store(self, probs: torch.Tensor) -> None:
+    def _store(self, probs: torch.Tensor, values: torch.Tensor) -> None:
         detached = probs.detach().float().cpu()
         row_error = (detached.sum(dim=-1) - 1.0).abs().max().item()
         incoming = detached.mean(dim=-2)
         incoming_error = (incoming.sum(dim=-1) - 1.0).abs().max().item()
         self.attention_probs = detached
+        self.value_norms = values.detach().float().norm(dim=-1).cpu()
         self.metadata = CaptureMetadata(
             shape=tuple(detached.shape),
             dtype=str(probs.dtype),
