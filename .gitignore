@@ -44,3 +44,7 @@ datasets/
 output_ckpt666/
 viscot_dataset/
 *.jsonl
+
+# Local audit artifacts (never commit generated reports or heatmaps)
+/qwen-evaluation1/audit_outputs/
+/qwen-evaluation1/results/vit_head_audit_v1/
