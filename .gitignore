@@ -44,3 +44,7 @@ datasets/
 output_ckpt666/
 viscot_dataset/
 *.jsonl
+
+# BBox-only teacher audit artifacts (local results and review bundle)
+/qwen-evaluation1/results/bbox_teacher_audit_v1/
+/qwen-evaluation1/review_pack_bbox_teacher_audit_v1.zip
